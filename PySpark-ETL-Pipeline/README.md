@@ -57,6 +57,77 @@ Sample gold output from the bundled data:
 | 2 | Fibrosis | 21 | 52.3 | 34.0 | 70.0 | 4.729 |
 | 3 | Cirrhosis | 30 | 53.5 | 5.4 | 90.4 | 16.844 |
 
+## Query the output from DBeaver (Spark Thrift Server)
+
+`spark_etl/serve.py` registers the pipeline's Parquet output as external SQL
+tables and starts the Spark Thrift Server, which speaks the HiveServer2 JDBC
+protocol that DBeaver (and Beeline, Power BI, Tableau, …) understand. No extra
+install is needed: the pip `pyspark` package already ships the Thrift server.
+
+```bash
+python -m spark_etl.pipeline --input data/hcvdata.csv --output output/   # once
+python -m spark_etl.serve --output output/                              # leave running
+# … Thrift server listening on jdbc:hive2://localhost:10000/hcv
+```
+
+Tables in database `hcv`:
+
+| Table | Source |
+|---|---|
+| `hcv.patients` | silver (partitioned by `diagnosis_code`) |
+| `hcv.diagnosis_summary` | gold |
+| `hcv.quarantine` | rejected rows with `_failed_rules` |
+
+Tables point at the Parquet files (nothing is copied), so re-running the
+pipeline and restarting `serve` shows the new data. The Derby metastore lives
+in `output/_metastore/`.
+
+**In DBeaver**
+
+1. *Database → New Database Connection*, search **Apache Spark** (or
+   **Apache Hive**, which uses the same driver) and click *Next*.
+2. Host `localhost`, port `10000`, database `hcv`.
+   JDBC URL: `jdbc:hive2://localhost:10000/hcv`.
+3. Authentication: any username, empty password (the local server runs with
+   `hive.server2.authentication=NONE`).
+4. *Test Connection*. On first use, DBeaver offers to download the Hive JDBC
+   driver; accept it.
+5. Open an SQL editor on the connection and run, for example:
+
+```sql
+SELECT diagnosis, patients, avg_age, avg_de_ritis_ratio
+FROM hcv.diagnosis_summary
+ORDER BY diagnosis_code;
+
+SELECT diagnosis_code, age_band, COUNT(*) AS n
+FROM hcv.patients
+WHERE is_hcv_positive
+GROUP BY diagnosis_code, age_band
+ORDER BY diagnosis_code, age_band;
+```
+
+Options: `--port 10001`, `--database other`, `--master spark://host:7077`.
+
+**Server on another machine.** The server has no authentication, so by
+default it binds to `localhost` only. Rather than `--host 0.0.0.0`, use
+DBeaver's *SSH* tab (connection settings → SSH → tunnel to the Spark host) and
+keep host `localhost` on the main tab.
+
+**Existing Spark cluster.** Start the bundled server there with
+`$SPARK_HOME/sbin/start-thriftserver.sh --master yarn --hiveconf hive.server2.thrift.port=10000`
+and connect the same way; create the tables with the same `CREATE TABLE … USING parquet LOCATION`
+statements. Databricks clusters use the Databricks JDBC driver instead (DBeaver
+has a *Databricks* connection type).
+
+**Troubleshooting**
+
+| Symptom | Fix |
+|---|---|
+| `Connection refused` | `serve` isn't running, or is on another port/host. |
+| `Required field 'client_protocol' is unset` | Driver/server version mismatch. In *Edit Driver → Libraries*, point the driver at a Hive JDBC 2.3.x standalone jar. |
+| Tables missing | Run the pipeline first; `serve` logs which output folders it skipped. |
+| A new pipeline run isn't visible | Restart `serve`, or in DBeaver run `MSCK REPAIR TABLE hcv.patients` then `REFRESH TABLE hcv.patients`. |
+
 ## Tests
 
 ```bash
